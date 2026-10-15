@@ -1,0 +1,17 @@
+# Release files belong in GitHub Releases.
+*.apk
+*.idsig
+*.jks
+*.keystore
+*.pem
+*.key
+*password*
+*credential*
+*.log
+.env*
+local.properties
+signing/
+work/
+tools/
+.DS_Store
+Thumbs.db

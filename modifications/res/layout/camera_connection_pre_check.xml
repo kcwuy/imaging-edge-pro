@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:orientation="vertical" android:paddingLeft="24dp" android:paddingTop="24dp"
+    android:paddingRight="24dp" android:paddingBottom="20dp" android:layout_width="match_parent"
+    android:layout_height="wrap_content" android:background="#f7f7f4">
+    <TextView android:id="@id/camera_connection_pre_check_text" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:text="@string/STRID_dlg_confirm_status"
+        android:textSize="16sp" android:textColor="#181919" android:fontFamily="sans-serif"
+        android:includeFontPadding="false" android:lineSpacingExtra="3dp" />
+    <ImageView android:id="@id/camera_connection_pre_check_image" android:layout_width="224dp"
+        android:layout_height="132dp" android:layout_gravity="center" android:layout_marginTop="20dp"
+        android:padding="12dp" android:background="@drawable/v3_connection_guide_panel"
+        android:src="@drawable/image_guide_connect_02" android:scaleType="fitCenter"
+        android:tint="#31557b" android:importantForAccessibility="no" />
+    <TextView android:id="@id/camera_connection_support_link" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:minHeight="48dp" android:gravity="center_vertical"
+        android:layout_marginTop="12dp" android:text="@string/STRID_addonapp_urllink"
+        android:textSize="14sp" android:textColor="#006cdb" android:fontFamily="sans-serif"
+        android:includeFontPadding="false" />
+    <CheckBox android:id="@id/checkbox_do_not_show_again" android:theme="@android:style/Theme.Material.Light"
+        android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="48dp"
+        android:layout_marginTop="4dp" android:text="@string/do_not_show_again" android:textSize="14sp"
+        android:textColor="#181919" android:buttonTint="#006cdb" android:fontFamily="sans-serif" />
+</LinearLayout>

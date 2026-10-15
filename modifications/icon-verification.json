@@ -1,0 +1,23 @@
+{
+  "artifact": "Imaging-Edge-7.8.6-V3.3-WhiteIcon.apk",
+  "sha256": "25400986c28f6cb2582d20b6fbc78fecdb96aef66a00a20de79e3da47669fd00",
+  "size": 72173220,
+  "base_sha256": "02e5efa6f59ae2d92c6eb7e476a63b2feab6c2a74642919379cf9bb028a5b87b",
+  "changed_members": [
+    "res/drawable-hdpi/icon_adaptive_iem_back.png",
+    "res/drawable-hdpi/icon_adaptive_iem_fore.png",
+    "res/drawable-mdpi/icon_adaptive_iem_back.png",
+    "res/drawable-mdpi/icon_adaptive_iem_fore.png",
+    "res/drawable-xhdpi/icon_adaptive_iem_back.png",
+    "res/drawable-xhdpi/icon_adaptive_iem_fore.png",
+    "res/drawable-xxhdpi/icon_adaptive_iem_back.png",
+    "res/drawable-xxhdpi/icon_adaptive_iem_fore.png"
+  ],
+  "unchanged_other_members": 5061,
+  "code_manifest_resource_table_unchanged": true,
+  "original_letter_alpha_unchanged": true,
+  "signature_verified": true,
+  "existing_certificate_unchanged": true,
+  "alignment_verified": true,
+  "device_tested": false
+}
