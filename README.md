@@ -4,6 +4,10 @@
 
 拍照不用被消息打断。遥控拍摄时临时切到后台回个消息，回来仍能保持与相机的连接，接着拍照。界面也换成更清爽的设计，让常用功能一眼可见。
 
+## 为什么做这个版本
+
+Sony 新版 Creators’ App 支持 ZV-E10 II，但官方兼容列表没有列出第一代 ZV-E10 和 α6400；Sony 对未列出的机型仍推荐使用 Imaging Edge Mobile。这个版本为继续使用老款相机的摄影者保留熟悉的连接与遥控拍摄，同时改善后台连接和日常操作界面。
+
 **[下载 Android 安装包](https://github.com/kcwuy/imaging-edge-pro/releases/download/v3.3/Imaging-Edge-7.8.6-V3.3-WhiteIcon.apk)** · [查看更新](https://github.com/kcwuy/imaging-edge-pro/releases/tag/v3.3)
 
 - 后台保持连接：临时切出去回消息，回来继续遥控拍照，省去反复重连。
