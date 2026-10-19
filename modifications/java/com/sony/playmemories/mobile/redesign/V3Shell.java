@@ -2,11 +2,14 @@ package com.sony.playmemories.mobile.redesign;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.Dialog;
+import android.app.ProgressDialog;
 import android.content.Context;
 import android.content.Intent;
 import android.content.res.Configuration;
 import android.content.res.ColorStateList;
 import android.graphics.Canvas;
+import android.graphics.Bitmap;
 import android.graphics.Insets;
 import android.graphics.Paint;
 import android.graphics.RectF;
@@ -21,12 +24,14 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
+import android.view.ViewTreeObserver;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ListAdapter;
 import android.widget.ListView;
+import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.Switch;
 import android.widget.TextView;
@@ -34,6 +39,8 @@ import android.widget.Toast;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Method;
 import java.util.WeakHashMap;
+import java.util.ArrayList;
+import java.util.Map;
 
 /** A native task shell around Sony's original, still-bound controllers and registration data. */
 public final class V3Shell {
@@ -42,16 +49,95 @@ public final class V3Shell {
     private static final int PAPER = 0xfff7f7f4, INK = 0xff181919, MUTED = 0xff70716f, BLUE = 0xff006cdb;
     private static final WeakHashMap<Activity, Binding> BINDINGS = new WeakHashMap<Activity, Binding>();
     private static final WeakHashMap<Activity, WebTransferWait> TRANSFER_WAITS = new WeakHashMap<Activity, WebTransferWait>();
+    private static final WeakHashMap<Activity, Boolean> RESUMED = new WeakHashMap<Activity, Boolean>();
+    private static final WeakHashMap<Activity, FirstDrawGate> DRAW_GATES = new WeakHashMap<Activity, FirstDrawGate>();
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static String pendingTask;
     private static long pendingUntil;
     private static boolean routeFromPhotoPage;
     private static String routeTab;
+    private static Handoff handoff;
+    private static final int MAX_HANDOFF_PIXELS = 1000000;
     private V3Shell() { }
     public static View cameraIllustration(Context context) { return new CameraDrawing(context); }
 
+    /** A bounded visual lease, independent of Sony's connection and dispatch state. */
+    public static final class HandoffLease {
+        private final String target;
+        private final int androidTask;
+        private final long deadline;
+        private boolean canceled;
+        public HandoffLease(String target, int androidTask, long now) {
+            this.target = target; this.androidTask = androidTask; deadline = now + 12000L;
+        }
+        public boolean accepts(String current, int taskId, long now) {
+            return !canceled && target != null && target.equals(current) && now < deadline
+                    && (androidTask < 0 || taskId < 0 || androidTask == taskId);
+        }
+        public void cancel() { canceled = true; }
+    }
+
+    /** The native controller owns its progress or dialog; the handoff HUD is only a fallback. */
+    public static final class LoadingPresentation {
+        private LoadingPresentation() { }
+        public static boolean showHandoff(boolean handoffVisible, boolean nativeBusy, boolean nativeDialogOrWindow) {
+            return handoffVisible && !nativeBusy && !nativeDialogOrWindow;
+        }
+    }
+
+    private static final class Handoff {
+        final HandoffLease lease;
+        final Bitmap frame;
+        Handoff(String target, Activity activity, Bitmap frame) {
+            lease = new HandoffLease(target, taskId(activity), SystemClock.elapsedRealtime()); this.frame = frame;
+        }
+    }
+    private static int taskId(Activity activity) {
+        try { return activity.getTaskId(); } catch (RuntimeException unavailable) { return -1; }
+    }
+    private static boolean intermediate(Activity activity) {
+        String name = activity.getClass().getName();
+        return name.equals(PREFIX + "home.HomeActivity") || name.equals(PREFIX + "selectfunction.SelectFunctionActivity");
+    }
+    private static boolean hasHandoff(Activity activity) {
+        return handoff != null && handoff.lease.accepts(task(), taskId(activity), SystemClock.elapsedRealtime());
+    }
+    /** CommonActivity calls this before its posted installers. Native onResume still runs in full. */
+    public static void beforeResume(Activity activity) {
+        if (activity == null) return;
+        RESUMED.put(activity, Boolean.TRUE);
+        if (!intermediate(activity) || !hasHandoff(activity)) return;
+        releaseDrawGate(activity);
+        FirstDrawGate gate = new FirstDrawGate(activity); DRAW_GATES.put(activity, gate);
+        activity.getWindow().getDecorView().getViewTreeObserver().addOnPreDrawListener(gate);
+        MAIN.postDelayed(gate, 800); // A failed installer must never leave the window undrawable.
+    }
+    private static void releaseDrawGate(Activity activity) {
+        FirstDrawGate gate = DRAW_GATES.remove(activity); if (gate != null) gate.release();
+    }
+    private static final class FirstDrawGate implements ViewTreeObserver.OnPreDrawListener, Runnable {
+        final WeakReference<Activity> host;
+        boolean released;
+        FirstDrawGate(Activity activity) { host = new WeakReference<Activity>(activity); }
+        @Override public boolean onPreDraw() {
+            Activity activity = host.get();
+            if (released || activity == null || !hasHandoff(activity)) { release(); return true; }
+            return false;
+        }
+        @Override public void run() { release(); }
+        void release() {
+            if (released) return;
+            released = true; MAIN.removeCallbacks(this);
+            Activity activity = host.get(); if (activity == null) return;
+            View view = activity.getWindow().getDecorView();
+            ViewTreeObserver observer = view.getViewTreeObserver(); if (observer.isAlive()) observer.removeOnPreDrawListener(this);
+            if (DRAW_GATES.get(activity) == this) DRAW_GATES.remove(activity);
+            view.invalidate();
+        }
+    }
+
     public static void install(Activity activity) {
-        if (activity == null || activity.isFinishing() || activity.isDestroyed()) return;
+        if (activity == null || activity.isFinishing() || activity.isDestroyed() || Boolean.FALSE.equals(RESUMED.get(activity))) return;
         String name = activity.getClass().getName();
         if (name.startsWith(PREFIX + "transfer.")) { clearTask(); return; }
         if (name.contains(".remotecontrol.") || name.contains(".ptpipremotecontrol.")) {
@@ -74,6 +160,12 @@ public final class V3Shell {
             BINDINGS.put(activity, binding);
         }
         binding.start();
+        if (hasHandoff(activity) && intermediate(activity)) {
+            // The native function screen is an internal handoff, not a second home navigation.
+            if (Build.VERSION.SDK_INT >= 34) activity.overrideActivityTransition(Activity.OVERRIDE_TRANSITION_OPEN, 0, 0, PAPER);
+            else activity.overridePendingTransition(0, 0);
+        }
+        releaseDrawGate(activity); // The identical source frame is already above the new shell.
         if (routeTab != null) {
             String selected = routeTab; routeTab = null;
             binding.guide = false; binding.setLegacyVisible(false); binding.tab = selected; binding.render(); binding.scroll.scrollTo(0,0);
@@ -87,18 +179,31 @@ public final class V3Shell {
         }
         if (name.contains(".selectfunction.") || name.contains(".home.")) binding.continueTask();
     }
-    public static void pause(Activity activity) { Binding b = BINDINGS.get(activity); if (b != null) b.stop(); WebTransferWait w = TRANSFER_WAITS.remove(activity); if (w != null) MAIN.removeCallbacks(w); }
-    public static void destroy(Activity activity) { pause(activity); BINDINGS.remove(activity); }
+    public static void pause(Activity activity) { RESUMED.put(activity, Boolean.FALSE); releaseDrawGate(activity); Binding b = BINDINGS.get(activity); if (b != null) b.stop(); WebTransferWait w = TRANSFER_WAITS.remove(activity); if (w != null) MAIN.removeCallbacks(w); }
+    public static void destroy(Activity activity) { pause(activity); BINDINGS.remove(activity); RESUMED.remove(activity); }
     public static boolean onBack(Activity activity) {
         Binding b = BINDINGS.get(activity);
         if (b == null) return false;
+        if (b.handoffCover != null) {
+            // A visible Sony blocker owns Back/cancel; removing our cover cannot consume that action.
+            boolean nativeBusy = b.busy(); clearTask();
+            if (b.sessionRequest != null) { b.sessionRequest.cancel(); b.sessionRequest = null; }
+            b.launching = false; return !nativeBusy;
+        }
+        if (b.sessionRequest != null) { b.sessionRequest.cancel(); b.sessionRequest = null; clearTask(); return true; }
         if (b.busy()) return false;
         if (b.guide) { b.closeGuide(true); return true; }
         if (b.legacy) { b.showLegacy(false); return true; }
         if (!"camera".equals(b.tab)) { b.switchTab("camera"); return true; }
         clearTask(); return false;
     }
-    public static void clearTask() { pendingTask = null; pendingUntil = 0; }
+    public static void clearTask() {
+        pendingTask = null; pendingUntil = 0;
+        if (handoff != null) handoff.lease.cancel();
+        handoff = null;
+        for (Binding binding : new ArrayList<Binding>(BINDINGS.values())) binding.endHandoff();
+        for (FirstDrawGate gate : new ArrayList<FirstDrawGate>(DRAW_GATES.values())) gate.release();
+    }
     /** Photo-source navigation requests a task; Sony still owns connection and function switching. */
     public static boolean openCameraPhotos(Activity activity) {
         Binding binding = BINDINGS.get(activity);
@@ -186,9 +291,17 @@ public final class V3Shell {
         final FrameLayout root, retained, presentation, pageStage;
         final ScrollView scroll;
         final LinearLayout shell, body, navigation;
+        FrameLayout handoffCover;
+        View handoffProgress;
+        final ViewTreeObserver.OnPreDrawListener loadingOwner = new ViewTreeObserver.OnPreDrawListener() {
+            @Override public boolean onPreDraw() { syncLoadingPresentation(); return true; }
+        };
         final Handler handler = new Handler(Looper.getMainLooper());
         final boolean wifi;
-        boolean active, guide, legacy, localSource, dispatching;
+        boolean active, guide, legacy, localSource, dispatching, launching;
+        long launchStarted;
+        V3SessionRouter.Request sessionRequest;
+        String guideModel = "";
         String tab = "camera", signature = "";
         Binding(Activity activity, ViewGroup content) {
             host = new WeakReference<Activity>(activity); this.content = content;
@@ -233,7 +346,92 @@ public final class V3Shell {
                     root.addView(overlay, new FrameLayout.LayoutParams(-1, -1));
                 }
             }
+            syncHandoff();
             render();
+        }
+        void beginHandoff() {
+            final Activity activity = host.get(); if (activity == null || task() == null) return;
+            if (!hasHandoff(activity)) {
+                Bitmap frame = null;
+                int width = presentation.getWidth(), height = presentation.getHeight();
+                if (width > 0 && height > 0) try {
+                    float scale = Math.min(1f, (float) Math.sqrt(MAX_HANDOFF_PIXELS / ((double) width * height)));
+                    frame = Bitmap.createBitmap(Math.max(1, Math.round(width * scale)), Math.max(1, Math.round(height * scale)), Bitmap.Config.ARGB_8888);
+                    // Snapshot only this sibling: both the handoff HUD and controller-owned
+                    // processing overlays live outside presentation and cannot be baked in.
+                    Canvas canvas = new Canvas(frame); canvas.scale(scale, scale); presentation.draw(canvas);
+                } catch (RuntimeException unavailable) { frame = null; }
+                catch (OutOfMemoryError unavailable) { frame = null; }
+                final Handoff created = new Handoff(task(), activity, frame); handoff = created;
+                MAIN.postDelayed(new Runnable() { @Override public void run() {
+                    if (handoff != created) return;
+                    clearTask(); toast("相机准备时间较长，请检查连接后重试。");
+                }}, 12000);
+            }
+            syncHandoff();
+        }
+        void syncHandoff() {
+            Activity activity = host.get();
+            if (activity == null || !hasHandoff(activity)) { endHandoff(); return; }
+            if (handoffCover != null) { syncLoadingPresentation(); return; }
+            handoffCover = new FrameLayout(activity); handoffCover.setBackgroundColor(PAPER);
+            handoffCover.setClickable(true); handoffCover.setFocusable(true);
+            if (handoff.frame != null) {
+                ImageView image = new ImageView(activity); image.setImageBitmap(handoff.frame); image.setScaleType(ImageView.ScaleType.FIT_XY);
+                image.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+                handoffCover.addView(image, new FrameLayout.LayoutParams(-1, -1));
+            }
+            LinearLayout progress = horizontal(); progress.setPadding(dp(18), dp(14), dp(18), dp(14)); progress.setBackground(round(0xffefefea, 20));
+            ProgressBar spinner = new ProgressBar(activity); spinner.setIndeterminateTintList(ColorStateList.valueOf(INK));
+            progress.addView(spinner, new LinearLayout.LayoutParams(dp(22), dp(22)));
+            TextView message = text("photos".equals(task()) ? "正在打开相机照片…" : "正在准备遥控拍摄…", 13, INK, false);
+            message.setPadding(dp(12), 0, 0, 0); progress.addView(message, new LinearLayout.LayoutParams(-2, -2));
+            handoffCover.addView(progress, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER));
+            handoffProgress = progress;
+            // Controller-owned processing overlays remain ABOVE this visual handoff.
+            root.addView(handoffCover, Math.min(1, root.getChildCount()), new FrameLayout.LayoutParams(-1, -1));
+            root.getViewTreeObserver().addOnPreDrawListener(loadingOwner);
+            syncLoadingPresentation();
+        }
+        void endHandoff() {
+            if (handoffCover == null) return;
+            ViewTreeObserver observer = root.getViewTreeObserver();
+            if (observer.isAlive()) observer.removeOnPreDrawListener(loadingOwner);
+            if (handoffCover.getParent() instanceof ViewGroup) ((ViewGroup) handoffCover.getParent()).removeView(handoffCover);
+            handoffCover.removeAllViews(); handoffCover = null; handoffProgress = null;
+        }
+        void syncLoadingPresentation() {
+            Activity activity = host.get();
+            if (handoffProgress == null || activity == null) return;
+            boolean otherWindow = !activity.hasWindowFocus() || nativeDialogVisible();
+            boolean show = LoadingPresentation.showHandoff(handoffCover != null, busy(), otherWindow);
+            int visibility = show ? View.VISIBLE : View.INVISIBLE;
+            if (handoffProgress.getVisibility() != visibility) handoffProgress.setVisibility(visibility);
+        }
+        boolean nativeDialogVisible() {
+            Activity activity = host.get(); if (activity == null) return false;
+            Object dialogs = field(field(activity, "mDialogManager"), "mDialogList");
+            if (dialogs instanceof Map<?, ?>) for (Object dialog : ((Map<?, ?>) dialogs).values()) {
+                if (dialogShowing(dialog)) return true;
+            }
+            Object manager = field(activity, "dialogManager");
+            if (dialogShowing(field(manager, "mFilePath")) || dialogShowing(field(manager, "mFileName"))) return true;
+            for (String name : new String[] {"mPairingDialog", "mSyncDialog", "mPreviewingDialog"})
+                if (dialogShowing(field(activity, name))) return true;
+            return false;
+        }
+        boolean dialogShowing(Object value) {
+            return value instanceof Dialog && ((Dialog) value).isShowing();
+        }
+        boolean nativeFailureVisible() {
+            Activity activity = host.get(); if (activity == null) return false;
+            Object dialogs = field(field(activity, "mDialogManager"), "mDialogList");
+            if (dialogs instanceof Map<?, ?>) for (Map.Entry<?, ?> entry : ((Map<?, ?>) dialogs).entrySet()) {
+                if (String.valueOf(entry.getKey()).contains("Failed") && entry.getValue() instanceof Dialog
+                        && ((Dialog) entry.getValue()).isShowing()) return true;
+            }
+            Object dialog = field(field(activity, "dialogManager"), "mFilePath");
+            return dialog instanceof Dialog && !(dialog instanceof ProgressDialog) && ((Dialog) dialog).isShowing();
         }
         void safeArea(WindowInsets insets) {
             int left, top, right, bottom;
@@ -247,17 +445,27 @@ public final class V3Shell {
             if (root.getPaddingLeft() != left || root.getPaddingTop() != top || root.getPaddingRight() != right || root.getPaddingBottom() != bottom)
                 root.setPadding(left, top, right, bottom);
         }
-        void start() { active = true; handler.removeCallbacks(this); if(!guide&&!legacy&&"camera".equals(tab))render(); refresh(); handler.postDelayed(this, 1200); }
-        void stop() { active = false; handler.removeCallbacks(this); V3TabMotion.cancel(presentation); V3TabMotion.cancel(pageStage); }
+        void start() { active = true; handler.removeCallbacks(this); syncHandoff(); if(!guide&&!legacy&&"camera".equals(tab))render(); refresh(); handler.postDelayed(this, handoffCover != null ? 150 : 1200); }
+        void stop() {
+            active = false; handler.removeCallbacks(this); launching = false;
+            if (sessionRequest != null) { sessionRequest.cancel(); sessionRequest = null; clearTask(); }
+            V3TabMotion.cancel(presentation); V3TabMotion.cancel(pageStage);
+        }
         public void run() {
             Activity a = host.get();
             if (!active || a == null || a.isDestroyed() || a.isFinishing()) return;
-            refresh(); handler.postDelayed(this, 1200);
+            refresh();
+            if (handoffCover != null && nativeFailureVisible()) { launching = false; clearTask(); }
+            if (sessionRequest != null || !wifi && task() != null && !launching && handoffCover != null) continueTask();
+            if (launching && SystemClock.elapsedRealtime() - launchStarted > 10000L) { launching = false; clearTask(); toast("尚未进入拍摄，请重试。"); }
+            syncHandoff();
+            handler.postDelayed(this, sessionRequest != null || handoffCover != null ? 150 : 1200);
         }
         void refresh() {
             Activity a = host.get(); if (a == null) return;
             Configuration config = a.getResources().getConfiguration();
-            String next = cameraName() + "|" + ConnectionKeeper.hasCameraConnection(a) + "|" + ConnectionKeeper.isEnabled(a) + "|" + ConnectionKeeper.isRunning() + "|" + config.orientation + "|" + config.fontScale;
+            V3SessionRouter.Snapshot session = V3SessionRouter.inspect(a);
+            String next = cameraName() + "|" + ConnectionKeeper.hasCameraConnection(a) + "|" + session.state + "|" + session.detail + "|" + ConnectionKeeper.isEnabled(a) + "|" + ConnectionKeeper.isRunning() + "|" + config.orientation + "|" + config.fontScale;
             if (!signature.equals(next)) { signature = next; if (!guide && !legacy) render(); }
         }
         void render() {
@@ -286,7 +494,7 @@ public final class V3Shell {
             String name = cameraName();
             add(text("你的相机",13,MUTED,false),14);
             add(text(name.length() == 0 ? "添加你的相机。" : name, 40, INK, true), 6);
-            add(text(connected ? "相机会话已连接" : name.length() == 0 ? "连接相机，开始你的创作。" : "未连接 · 已保留相机记录", 12, connected ? 0xff258658 : MUTED, false), 8);
+            add(text(connectionLabel(connected, name), 12, connected ? 0xff258658 : MUTED, false), 8);
             if (name.toUpperCase().replace(" ", "").equals("ZV-E10")) {
                 int imageId = a.getResources().getIdentifier("v3_zve10", "drawable", a.getPackageName());
                 if (imageId != 0) {
@@ -319,7 +527,7 @@ public final class V3Shell {
             board.addView(illustration, new LinearLayout.LayoutParams(0, dp(140), .38f));
             LinearLayout words = new LinearLayout(a); words.setOrientation(LinearLayout.VERTICAL); words.setPadding(dp(20), 0, 0, 0);
             words.addView(text(name.length()==0 ? "添加你的相机。" : name, 26, INK, true));
-            TextView state = text(connected ? "相机会话已连接" : name.length()==0 ? "连接相机，开始创作。" : "未连接 · 已保留相机记录", 11, connected ? 0xff258658 : MUTED, false);
+            TextView state = text(connectionLabel(connected, name), 11, connected ? 0xff258658 : MUTED, false);
             state.setPadding(0, dp(3), 0, dp(10)); words.addView(state);
             LinearLayout actions = horizontal();
             TextView shoot = button("遥控拍摄", true, new Runnable(){public void run(){startTask("shoot");}});
@@ -375,18 +583,32 @@ public final class V3Shell {
             add(row("导入质量与保存位置", "沿用相机与应用当前设置", new Runnable(){public void run(){openOriginalSettings();}}), 4);
             add(row("相机工具", "位置关联、远程电源等", new Runnable(){public void run(){showLegacy(true);}}), 4);
             add(row("连接帮助", "查看相机端操作", new Runnable(){public void run(){showGuide();}}), 4);
+            add(row("检查相机资料", V3CatalogPrompt.status(a), new Runnable(){public void run(){V3CatalogPrompt.requestUpdate(a);}}), 4);
             section("关于");
-            add(row("关于 Imaging Edge", "产品重构 V3", new Runnable(){public void run(){launchSettings("settings.AboutScreen");}}), 4);
+            add(row("关于 Imaging Edge", "4.0.1", new Runnable(){public void run(){launchSettings("settings.AboutScreen");}}), 4);
         }
         void guidePage() {
             add(button("‹  返回", false, new Runnable(){public void run(){closeGuide(true);}}), 0);
             add(text("连接相机", 13, MUTED, false), 18);
             add(text("在相机上，\n做好连接准备。", 31, INK, true), 12);
-            String name = cameraName(); boolean zve = name.length()==0 || name.toUpperCase().contains("ZV-E10");
-            add(text(zve ? "ZV-E10 一代 · 在相机上操作" : name + " · 在相机上操作", 13, MUTED, false), 14);
+            String name = guideModel.length() == 0 ? cameraName() : guideModel;
+            V3CameraGuide.Guide model = V3CameraGuide.forCamera(name);
+            final boolean importing = "photos".equals(task());
+            add(row(model.model + " · 操作说明", "选择其他机型  ›", new Runnable(){public void run(){
+                new AlertDialog.Builder(host.get()).setTitle("选择说明机型")
+                        .setItems(V3CameraGuide.modelNames(), new android.content.DialogInterface.OnClickListener(){
+                            public void onClick(android.content.DialogInterface dialog, int index) {
+                                guideModel = V3CameraGuide.supportedModels()[index]; render();
+                            }
+                        }).setNegativeButton("取消", null).show();
+            }}), 14);
             LinearLayout card = new LinearLayout(host.get()); card.setOrientation(1); card.setPadding(dp(18),dp(18),dp(18),dp(18)); card.setBackground(round(0xffeeefe9,20));
-            TextView path = text(zve ? "MENU  ›  网络\n智能手机连接功能\n智能手机连接  →  开\n连接  →  显示二维码" : "打开相机的智能手机连接设置。\n相机型号不同，菜单名称可能不同。", 15, INK, true); card.addView(path); add(card, 24);
-            add(text("1  在相机上显示连接二维码。\n\n2  轻点下方按钮，选择机型并扫码。\n\n3  按手机提示允许连接相机 Wi-Fi。", 14, MUTED, false), 22);
+            StringBuilder instructions = new StringBuilder(model.title(importing));
+            int step = 1;
+            for (String instruction : model.steps(importing)) instructions.append("\n\n").append(step++).append("  ").append(instruction);
+            TextView path = text(instructions.toString(), 15, INK, true); card.addView(path); add(card, 24);
+            add(text("轻点下方“开始连接”，按应用提示扫码或输入相机 Wi-Fi 密码。部分老机型不提供二维码。", 14, MUTED, false), 22);
+            add(text(model.note, 12, MUTED, false), 14);
             add(text("相机 Wi-Fi 通常不提供互联网。保留此连接，即可继续拍摄或导入。", 12, MUTED, false), 22);
             add(button("开始连接", true, new Runnable(){public void run(){beginOriginalPairing();}}), 26);
             add(button("使用已保存的相机", false, new Runnable(){public void run(){boolean pending=task()!=null;closeGuide(false);if(pending)connectSaved();}}), 6);
@@ -407,6 +629,8 @@ public final class V3Shell {
             }
         }
         void startTask(String target) {
+            if (sessionRequest != null && task() == null) { sessionRequest.cancel(); sessionRequest = null; }
+            if (launching || sessionRequest != null) { toast("正在准备相机，请稍候。"); return; }
             if (busy()) { toast("正在处理相机操作，请稍候。"); return; }
             requestTask(target);
             if (continueTask()) return;
@@ -421,12 +645,52 @@ public final class V3Shell {
             return false;
         }
         boolean continueTask() {
-            if (dispatching || task() == null) return false;
-            Activity a = host.get(); if (a == null || wifi) return false;
+            if (task() == null) { if (sessionRequest != null) { sessionRequest.cancel(); sessionRequest = null; } return false; }
+            if (dispatching || launching) return false;
+            Activity a = host.get(); if (a == null || !active) return false;
+            V3SessionRouter.Snapshot session = V3SessionRouter.inspect(a);
+            if (sessionRequest != null) {
+                int decision = sessionRequest.step(session.camera, task(), session.state, busy(), SystemClock.elapsedRealtime());
+                if (decision == V3SessionRouter.WAIT) return true;
+                sessionRequest = null;
+                if (decision != V3SessionRouter.READY) { clearTask(); toast("相机会话未准备好，请重试连接。"); return true; }
+            } else if (session.state == V3SessionRouter.WAIT || (session.state == V3SessionRouter.READY && busy())) {
+                beginHandoff();
+                sessionRequest = new V3SessionRouter.Request(session.camera, task(), SystemClock.elapsedRealtime());
+                handler.removeCallbacks(this); handler.postDelayed(this, 150); return true;
+            }
+            if (wifi) {
+                if (session.state != V3SessionRouter.READY) return false;
+                if ("photos".equals(task()) && "PtpIpRemoteShooting".equals(String.valueOf(field(session.camera, "mModel")))) {
+                    // This native dispatcher only opens remote shooting; it cannot open a photo browser.
+                    clearTask();
+                    new AlertDialog.Builder(a).setTitle("请切换相机连接方式")
+                            .setMessage("当前连接用于遥控拍摄。请在相机上开启“发送到智能手机”，再查看相机照片。")
+                            .setPositiveButton("知道了", null).show();
+                    return true;
+                }
+                // Re-running discovery suppresses cameraAdded for an already registered camera.
+                // Reuse Sony's original function dispatcher and preserve the task across native navigation.
+                beginHandoff(); launching = true; launchStarted = SystemClock.elapsedRealtime();
+                if (V3SessionRouter.reuseWifi(a, session.camera)) return true;
+                launching = false; clearTask(); toast("暂时无法打开相机功能，请重试连接。"); return true;
+            }
+            if (session.state == V3SessionRouter.STALE) { clearTask(); toast("相机会话已失效，请重新连接。"); return true; }
+            if (busy()) return false;
             View target = original("shoot".equals(task()) ? "remote_shooting" : a.getClass().getName().contains(".selectfunction.") ? "smartphone_transfer" : "content_viewer");
             if (target == null || !target.isEnabled() || !target.hasOnClickListeners()) return false;
-            clearTask(); dispatching=true;
-            try { return target.performClick(); } finally { dispatching=false; }
+            // Preserve the task and identical source frame until the REAL destination installs.
+            // Sony may prepare a function asynchronously after this click.
+            beginHandoff(); dispatching=true; launching=true; launchStarted=SystemClock.elapsedRealtime();
+            try { boolean accepted=target.performClick(); if(!accepted){launching=false;clearTask();}return accepted; }
+            catch (RuntimeException failed) { launching=false; clearTask(); Log.e("V3Shell", "Native function dispatch failed", failed); return true; }
+            finally { dispatching=false; }
+        }
+        String connectionLabel(boolean connected, String name) {
+            V3SessionRouter.Snapshot session = V3SessionRouter.inspect(host.get());
+            if (session.state == V3SessionRouter.WAIT) return "正在准备相机会话…";
+            if (session.state == V3SessionRouter.STALE) return "相机会话已失效 · 请重新连接";
+            return connected ? "相机会话已连接" : name.length() == 0 ? "连接相机，开始你的创作。" : "未连接 · 已保留相机记录";
         }
         void connectSaved() {
             View list = original("wifi_activity_device_list_view");
@@ -435,7 +699,7 @@ public final class V3Shell {
                 if (adapter != null && adapter.getCount()>0) {
                     View row=adapter.getView(0,null,(ListView)list);
                     int id=id("wifi_camera_connecting_status_icon"); View connect=row.findViewById(id);
-                    if (connect != null && connect.isEnabled() && connect.hasOnClickListeners()) { connect.performClick(); return; }
+                    if (connect != null && connect.isEnabled() && connect.hasOnClickListeners()) { beginHandoff(); connect.performClick(); return; }
                 }
             }
             clearTask(); toast("暂时无法读取已保存的相机，请重新选择。"); deviceDetails();
@@ -520,6 +784,7 @@ public final class V3Shell {
             V3TabMotion.replace(pageStage,scroll,direction,0,new Runnable(){public void run(){tab=target;render();scroll.scrollTo(0,0);}});
         }
         void showGuide(){
+            guideModel = "";
             if(guide)return;
             V3TabMotion.replace(presentation,shell,1,0,new Runnable(){public void run(){guide=true;render();scroll.scrollTo(0,0);}});
         }

@@ -1,0 +1,18 @@
+{
+  "version": "7.8.6-product.4.0.1",
+  "versionCode": 786260841,
+  "sha256": "0ab1cd2cb20f9771bbe59dbc976bf3f04641e0f3835dd36e3f052b72be71933d",
+  "artifact_checks": 1078,
+  "layout_contracts": 485,
+  "signature_verified": true,
+  "alignment_verified": true,
+  "host_assertions": {
+    "background": 96,
+    "parameters": 92,
+    "session": 52,
+    "handoff_loading": 21,
+    "catalog": 38,
+    "model_guides": 103
+  },
+  "validation_scope": "Offline helper fixtures and APK checks; no 4.0.1 device or camera runtime test."
+}

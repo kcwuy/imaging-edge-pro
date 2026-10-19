@@ -11,6 +11,7 @@ public final class V3Theme {
     private V3Theme() { }
     public static void beforeCreate(Activity activity) { IosTheme.beforeCreate(activity); V3TabMotion.configure(activity); }
     public static void onResume(final Activity activity) {
+        V3Shell.beforeResume(activity);
         V3TabMotion.onResume(activity);
         IosTheme.onResume(activity);
         MAIN.post(new Runnable() { public void run() {
